@@ -21,7 +21,7 @@ export function createWorld(seed) {
     rng, city,
     time: 0, dayT: 0.32, // late-morning light at spawn
     mode: 'title',
-    player: { x: start.x + 30, y: start.y + 20, angle: -Math.PI / 2, aim: -Math.PI / 2, hp: 100, car: null, speedMag: 0 },
+    player: { x: start.x + 30, y: start.y + 20, angle: -Math.PI / 2, aim: -Math.PI / 2, hp: 100, car: null, speedMag: 0, vx: 0, vy: 0, walkDist: 0 },
     cars: [], cops: [], peds: [], bullets: [], particles: [], pickups: [],
     events: [], threat: null, dialog: null,
     heat: 0, wanted: 0, busted: 0, seenByCop: false, copSpawnT: 0, roadblockSet: false,
@@ -76,7 +76,7 @@ export function stepWorld(G, input, dt) {
   G.time += dt;
   if (G.mode === 'title') {
     if (input.wasPressed('confirm')) { G.mode = 'play'; G.events.push('enter'); }
-    updateCamera(G);
+    updateCamera(G, dt);
     return;
   }
   if (G.mode === 'pause') {
@@ -117,10 +117,16 @@ export function stepWorld(G, input, dt) {
   if (G.wanted === 0 && G.player.hp < 100) G.player.hp = Math.min(100, G.player.hp + 1.1 * dt);
 
   G.district = districtLabelAt(G.city, G.player.x, G.player.y);
-  updateCamera(G);
+  updateCamera(G, dt);
 
   G.saveT += dt;
   if (G.saveT > 15) { G.saveT = 0; storeSave(G); }
+}
+
+// Move `value` toward `target` by at most `maxDelta` (a linear ramp).
+function approach(value, target, maxDelta) {
+  if (value < target) return Math.min(target, value + maxDelta);
+  return Math.max(target, value - maxDelta);
 }
 
 function stepPlayer(G, input, dt) {
@@ -139,22 +145,38 @@ function stepPlayer(G, input, dt) {
     }
     p.x = car.x; p.y = car.y; p.angle = car.angle;
     p.speedMag = Math.abs(car.speed);
+    p.vx = 0; p.vy = 0;
     if (input.wasPressed('interact')) exitCar(G);
     if (input.mouse.down) tryShoot(G);
     return;
   }
 
-  // On foot.
+  // On foot: velocity-based movement. Nilo accelerates toward the input
+  // direction and glides to a stop under friction when it is released,
+  // instead of snapping between full speed and a standstill in one step.
+  // The top speed is unchanged: WALK_SPEED (x1.35 while running).
   const mx = input.axisX(), my = input.axisY();
   const moving = mx !== 0 || my !== 0;
   const run = input.isHeld('run') ? 1.35 : 1;
+  let tx = 0, ty = 0;
   if (moving) {
     const len = Math.hypot(mx, my);
-    p.x += (mx / len) * WALK_SPEED * run * dt;
-    p.y += (my / len) * WALK_SPEED * run * dt;
-    p.angle = p.aim;
+    tx = (mx / len) * WALK_SPEED * run;
+    ty = (my / len) * WALK_SPEED * run;
   }
-  p.speedMag = moving ? WALK_SPEED : 0;
+  const rate = moving ? 1250 : 950; // px/s^2 toward the target velocity
+  p.vx = approach(p.vx || 0, tx, rate * dt);
+  p.vy = approach(p.vy || 0, ty, rate * dt);
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+  p.speedMag = Math.hypot(p.vx, p.vy);
+  p.walkDist = (p.walkDist || 0) + p.speedMag * dt;
+  // Facing eases toward the aim along the shortest arc (frame-rate
+  // independent), so turns read as a swing, not a snap.
+  let faceDiff = p.aim - p.angle;
+  while (faceDiff > Math.PI) faceDiff -= Math.PI * 2;
+  while (faceDiff < -Math.PI) faceDiff += Math.PI * 2;
+  p.angle += faceDiff * (1 - Math.exp(-14 * dt));
   const pos = { x: p.x, y: p.y };
   collideCircle(G.city, pos, WALK_RADIUS);
   p.x = pos.x; p.y = pos.y;
@@ -199,7 +221,10 @@ function exitCar(G) {
   const car = p.car;
   car.kind = 'parked';
   car.speed = 0;
+  car.throttleSm = 0;
+  car.steerSm = 0;
   p.car = null;
+  p.vx = 0; p.vy = 0;
   // Step out to the left of the car, unless a building blocks it.
   const lx = car.x + Math.cos(car.angle - Math.PI / 2) * 34;
   const ly = car.y + Math.sin(car.angle - Math.PI / 2) * 34;
@@ -294,15 +319,45 @@ function respawn(G) {
   if (G.player.car) { G.player.car.kind = 'parked'; G.player.car = null; }
   const s = G.city.landmarks.workshop;
   G.player.x = s.x; G.player.y = s.y;
+  G.player.vx = 0; G.player.vy = 0;
   G.player.hp = 100;
   G.mode = 'play';
   say(G, 'Sinta', G.mode === 'play' && fine === 50 ? 'Sudah kubilang hati-hati. Bengkelku jadi tempat persembunyianmu lagi.' : 'Kau sadar di bengkelku. Istirahat dulu, baru lanjut.', 3.2);
   storeSave(G);
 }
 
-function updateCamera(G) {
-  G.camera.x = Math.max(0, Math.min(WORLD_W - VIEW_W, G.player.x - VIEW_W / 2));
-  G.camera.y = Math.max(0, Math.min(WORLD_H - VIEW_H, G.player.y - VIEW_H / 2));
+function updateCamera(G, dt) {
+  // A gentle lookahead: the view leads Nilo a little along his motion —
+  // by car speed and heading when driving, by walk velocity on foot —
+  // capped so it never feels like the world is sliding away.
+  let lx = 0, ly = 0;
+  const p = G.player;
+  if (p.car) {
+    lx = Math.cos(p.angle) * p.car.speed * 0.22;
+    ly = Math.sin(p.angle) * p.car.speed * 0.22;
+    const m = Math.hypot(lx, ly);
+    if (m > 64) { lx = lx / m * 64; ly = ly / m * 64; }
+  } else {
+    lx = (p.vx || 0) * 0.18;
+    ly = (p.vy || 0) * 0.18;
+    const m = Math.hypot(lx, ly);
+    if (m > 40) { lx = lx / m * 40; ly = ly / m * 40; }
+  }
+  const tx = Math.max(0, Math.min(WORLD_W - VIEW_W, p.x + lx - VIEW_W / 2));
+  const ty = Math.max(0, Math.min(WORLD_H - VIEW_H, p.y + ly - VIEW_H / 2));
+  if (dt === undefined || !G.camInit) {
+    // First framing (world creation): snap, exactly as before.
+    G.camera.x = tx; G.camera.y = ty;
+    G.camInit = true;
+    return;
+  }
+  // Exponential smoothing, frame-rate independent: the camera glides
+  // after its target instead of being hard-locked to the player.
+  const k = 1 - Math.exp(-7.5 * dt);
+  G.camera.x += (tx - G.camera.x) * k;
+  G.camera.y += (ty - G.camera.y) * k;
+  G.camera.x = Math.max(0, Math.min(WORLD_W - VIEW_W, G.camera.x));
+  G.camera.y = Math.max(0, Math.min(WORLD_H - VIEW_H, G.camera.y));
 }
 
 export { STEP };

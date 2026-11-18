@@ -20,6 +20,11 @@ export function createCar(x, y, angle, color, kind) {
     cruise: 150,
     honkT: 0,
     dead: false,
+    // Smoothed driver inputs (see stepCarPhysics): the raw throttle and
+    // steering ease toward these, so starts, stops and turns feel fluid
+    // instead of switching on and off in a single step.
+    throttleSm: 0,
+    steerSm: 0,
   };
 }
 
@@ -82,18 +87,32 @@ export function dirVector(dir) {
   return [[1, 0], [0, 1], [-1, 0], [0, -1]][dir];
 }
 
+// Move `value` toward `target` by at most `maxDelta` (a linear ramp).
+function ramp(value, target, maxDelta) {
+  if (value < target) return Math.min(target, value + maxDelta);
+  return Math.max(target, value - maxDelta);
+}
+
 // Advance one car with driver inputs: throttle -1..1, steer -1..1.
 // Returns impact speed if it slammed a building this step, else 0.
+// The inputs are ramped first (throttle ~5.5/s, steering ~7/s), so the
+// car eases into motion and into a turn; the caps below — acceleration,
+// top speed, reverse speed and turn rate — are exactly as before, only
+// the arrival at them is smooth.
 export function stepCarPhysics(G, car, throttle, steer, dt, handbrake) {
-  const accel = throttle > 0 ? CAR_ACCEL : CAR_ACCEL * 0.7;
-  car.speed += throttle * accel * dt;
+  car.throttleSm = ramp(car.throttleSm || 0, throttle, 5.5 * dt);
+  car.steerSm = ramp(car.steerSm || 0, steer, 7 * dt);
+  const thr = car.throttleSm;
+  const str = car.steerSm;
+  const accel = thr > 0 ? CAR_ACCEL : CAR_ACCEL * 0.7;
+  car.speed += thr * accel * dt;
   // Drag and rolling friction.
   car.speed -= car.speed * (handbrake ? 2.6 : 0.55) * dt;
-  if (throttle === 0) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 26 * dt);
+  if (Math.abs(thr) < 0.05) car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 26 * dt);
   car.speed = Math.max(-CAR_MAX_REVERSE, Math.min(CAR_MAX_SPEED, car.speed));
   if (Math.abs(car.speed) > 4) {
     const grip = Math.min(1, Math.abs(car.speed) / 130);
-    car.angle += steer * CAR_TURN * grip * dt * (car.speed >= 0 ? 1 : -1);
+    car.angle += str * CAR_TURN * grip * dt * (car.speed >= 0 ? 1 : -1);
   }
   const before = Math.abs(car.speed);
   car.x += Math.cos(car.angle) * car.speed * dt;

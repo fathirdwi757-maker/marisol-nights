@@ -2,6 +2,8 @@
 // mouse aim point in screen space, and one-shot actions (interact, pause,
 // confirm) queued so a press between frames is never lost.
 
+import { VIEW_W, VIEW_H } from './config.js';
+
 export function createInput(canvas) {
   const held = new Set();
   const pressed = new Set();
@@ -33,8 +35,10 @@ export function createInput(canvas) {
 
   canvas.addEventListener('mousemove', (e) => {
     const r = canvas.getBoundingClientRect();
-    mouse.x = (e.clientX - r.left) / r.width * canvas.width;
-    mouse.y = (e.clientY - r.top) / r.height * canvas.height;
+    // Aim lives in logical view units, independent of the (supersampled)
+    // canvas backing store, so HD rendering never shifts the aim point.
+    mouse.x = (e.clientX - r.left) / r.width * VIEW_W;
+    mouse.y = (e.clientY - r.top) / r.height * VIEW_H;
   });
   canvas.addEventListener('mousedown', (e) => { if (e.button === 0) { mouse.down = true; pressed.add('confirm'); } });
   window.addEventListener('mouseup', (e) => { if (e.button === 0) mouse.down = false; });

@@ -6,6 +6,12 @@ export const VIEW_W = 1280;
 export const VIEW_H = 720;
 export const STEP = 1 / 60;
 
+// HD rendering: the canvas backing store is RENDER_SCALE times the
+// logical view size, and the frame is drawn under a matching base
+// transform, so every world-unit shape and letter stays crisp on
+// high-density displays instead of being stretched from 1280x720.
+export const RENDER_SCALE = 2;
+
 // City layout: a grid of blocks separated by two-lane roads.
 export const ROAD_W = 96;
 export const BLOCK_W = 430;

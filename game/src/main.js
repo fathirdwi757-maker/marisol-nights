@@ -2,7 +2,7 @@
 // mouse aim translated into world space, synth audio fed by world events,
 // and the ?shot= staging mode the screenshot captures use.
 
-import { VIEW_W, VIEW_H, STEP } from './config.js';
+import { VIEW_W, VIEW_H, STEP, RENDER_SCALE } from './config.js';
 import { createInput } from './input.js';
 import { createWorld, applySave, stepWorld } from './world.js';
 import { drawWorld } from './render.js';
@@ -14,8 +14,12 @@ import { stageShot } from './shots.js';
 import { tryShoot } from './combat.js';
 
 const canvas = document.getElementById('game');
-canvas.width = VIEW_W;
-canvas.height = VIEW_H;
+// HD: the backing store is RENDER_SCALE times the logical 1280x720 view
+// (the CSS size is unchanged — the canvas still fills the window), and
+// frame() draws under a matching base transform so all world-unit
+// drawing below stays exactly as written, only sharper.
+canvas.width = VIEW_W * RENDER_SCALE;
+canvas.height = VIEW_H * RENDER_SCALE;
 const ctx = canvas.getContext('2d');
 const status = document.getElementById('status');
 const input = createInput(canvas);
@@ -34,6 +38,10 @@ window.addEventListener('keydown', () => audio.unlock(), { once: false });
 canvas.addEventListener('mousedown', () => audio.unlock());
 
 function frame() {
+  // Base HD transform: one logical unit now covers RENDER_SCALE device
+  // pixels. Every draw routine saves/restores around its own transforms,
+  // so this scale carries cleanly through world, HUD and screens.
+  ctx.setTransform(RENDER_SCALE, 0, 0, RENDER_SCALE, 0, 0);
   G.objectiveCache = currentObjective(G);
   drawWorld(ctx, G);
   if (G.mode !== 'title') drawHud(ctx, G);

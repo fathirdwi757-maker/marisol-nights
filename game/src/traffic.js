@@ -90,7 +90,15 @@ export function stepTraffic(G, dt) {
         }
       }
     }
-    car.angle = dirAngle(car.dir);
+    // Ease the body toward the lane heading along the shortest arc at a
+    // capped rate, instead of snapping a quarter-turn in one step; the
+    // car still travels along its lane vector exactly as before.
+    const targetAngle = dirAngle(car.dir);
+    let diff = targetAngle - car.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const maxTurn = 4.2 * dt;
+    car.angle += Math.max(-maxTurn, Math.min(maxTurn, diff));
     // Recycle cars that leave the world.
     if (car.x < -60 || car.y < -60 || car.x > 2260 || car.y > 1740) {
       car.dead = true;

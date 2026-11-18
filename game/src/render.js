@@ -2,8 +2,22 @@
 // rooftops, two-lane roads, traffic, pedestrians, police with flashing
 // light bars, the mission beacon, and a night tint with headlights after
 // dark. Reads state only; the simulation lives in world.js.
+//
+// HD pass: the frame is drawn under the RENDER_SCALE base transform
+// (see main.js), and the city carries cheap precomputed-style detail —
+// per-building shade variation and rooftop clutter from a position
+// hash (no RNG, so the seeded city looks identical every load), road
+// edge lines, soft elliptical shadows, two-tone cars and a graded bay
+// shoreline along the south edge of the map.
 
-import { VIEW_W, VIEW_H, PALETTE, DISTRICT_INFO } from './config.js';
+import { VIEW_W, VIEW_H, WORLD_W, WORLD_H, PALETTE, DISTRICT_INFO } from './config.js';
+
+// Deterministic 0..1 hash of a world position: stable per building or
+// tree across frames and loads, without touching the seeded RNG.
+function hash2(x, y) {
+  const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return h - Math.floor(h);
+}
 
 export function nightFactor(G) {
   if (typeof G.nightOverride === 'number') return G.nightOverride;
@@ -73,17 +87,39 @@ function drawGround(ctx, G) {
       ctx.fillRect(b.x + 13, b.y + b.h - 60, b.w - 26, 12); // foam line
     }
   }
+  drawBay(ctx, G);
   for (const bd of city.buildings) {
     if (!onScreen(G, bd.x + bd.w / 2, bd.y + bd.h / 2, 200)) continue;
     ctx.fillStyle = 'rgba(0,0,0,0.20)';
     ctx.fillRect(bd.x + 6, bd.y + 8, bd.w, bd.h);
     ctx.fillStyle = bd.color;
     ctx.fillRect(bd.x, bd.y, bd.w, bd.h);
+    // Per-building shade variation: neighbouring roofs no longer share
+    // one flat tone — a whisper of sun or shadow, fixed by position.
+    const v = hash2(bd.x, bd.y);
+    if (v < 0.5) {
+      ctx.fillStyle = `rgba(20,16,8,${(0.5 - v) * 0.30})`;
+      ctx.fillRect(bd.x, bd.y, bd.w, bd.h);
+    } else {
+      ctx.fillStyle = `rgba(255,250,235,${(v - 0.5) * 0.22})`;
+      ctx.fillRect(bd.x, bd.y, bd.w, bd.h);
+    }
     ctx.strokeStyle = 'rgba(0,0,0,0.25)';
     ctx.lineWidth = 2;
     ctx.strokeRect(bd.x, bd.y, bd.w, bd.h);
     ctx.fillStyle = 'rgba(255,255,255,0.20)';
     ctx.fillRect(bd.x + 7, bd.y + 7, bd.w - 14, 10); // roof ridge highlight
+    // Rooftop clutter: an AC box and a vent, placed by the same hash.
+    if (bd.w > 64 && bd.h > 54) {
+      const ax = bd.x + 12 + hash2(bd.y, bd.x) * Math.max(1, bd.w - 52);
+      const ay = bd.y + bd.h - 30 - hash2(bd.x * 3, bd.y) * Math.max(1, bd.h - 64);
+      ctx.fillStyle = 'rgba(0,0,0,0.20)';
+      ctx.fillRect(ax, ay, 20, 13);
+      ctx.fillStyle = 'rgba(255,255,255,0.16)';
+      ctx.fillRect(ax + 2, ay + 2, 16, 4);
+      ctx.fillStyle = 'rgba(0,0,0,0.16)';
+      ctx.beginPath(); ctx.arc(bd.x + bd.w - 20 - v * 18, bd.y + 24, 6, 0, Math.PI * 2); ctx.fill();
+    }
     if (bd.w > 120 && bd.h > 70) {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.font = '600 12px system-ui, sans-serif';
@@ -93,8 +129,9 @@ function drawGround(ctx, G) {
   }
   for (const t of city.trees) {
     if (!onScreen(G, t.x, t.y, 50)) continue;
-    ctx.fillStyle = 'rgba(0,0,0,0.15)';
-    ctx.beginPath(); ctx.arc(t.x + 3, t.y + 4, t.r, 0, Math.PI * 2); ctx.fill();
+    // Soft elliptical ground shadow, then the canopy.
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.beginPath(); ctx.ellipse(t.x + 3, t.y + 5, t.r * 0.95, t.r * 0.58, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = t.palm ? '#58a34c' : '#3f7d33';
     ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = 'rgba(255,255,255,0.18)';
@@ -119,6 +156,26 @@ function drawGround(ctx, G) {
   signAt(ctx, G, city.landmarks.harborDock, 'DERMAGA', '#ffd76a');
 }
 
+// The bay itself: a graded water strip along the south edge of the map,
+// below the last lane of the shore road, with a bright shoreline where
+// the promenade meets the water. Only drawn when the shore is in view.
+function drawBay(ctx, G) {
+  if (G.camera.y + VIEW_H < WORLD_H - 190) return;
+  const y0 = WORLD_H - 16;
+  const grad = ctx.createLinearGradient(0, y0, 0, WORLD_H);
+  grad.addColorStop(0, '#57b8cf');
+  grad.addColorStop(0.45, PALETTE.water);
+  grad.addColorStop(1, '#2f7ea6');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, y0, WORLD_W, 16);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillRect(0, y0 - 2, WORLD_W, 2.5); // shoreline highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  for (let x = 26; x < WORLD_W; x += 118) {
+    ctx.fillRect(x + (hash2(x, 7) * 40 - 20), y0 + 5 + hash2(7, x) * 6, 22, 1.6); // foam flecks
+  }
+}
+
 function signAt(ctx, G, pos, text, color) {
   if (!onScreen(G, pos.x, pos.y, 80)) return;
   ctx.fillStyle = color;
@@ -130,6 +187,18 @@ function signAt(ctx, G, pos, text, color) {
 }
 
 function drawRoadMarkings(ctx, G) {
+  // Solid edge lines framing each road band.
+  ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+  ctx.lineWidth = 2;
+  for (const r of G.city.vRoads) {
+    ctx.beginPath(); ctx.moveTo(r.x0 + 5, Math.max(0, G.camera.y - 20)); ctx.lineTo(r.x0 + 5, G.camera.y + VIEW_H + 20); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(r.x1 - 5, Math.max(0, G.camera.y - 20)); ctx.lineTo(r.x1 - 5, G.camera.y + VIEW_H + 20); ctx.stroke();
+  }
+  for (const r of G.city.hRoads) {
+    ctx.beginPath(); ctx.moveTo(Math.max(0, G.camera.x - 20), r.y0 + 5); ctx.lineTo(G.camera.x + VIEW_W + 20, r.y0 + 5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(Math.max(0, G.camera.x - 20), r.y1 - 5); ctx.lineTo(G.camera.x + VIEW_W + 20, r.y1 - 5); ctx.stroke();
+  }
+  // Dashed centre lines.
   ctx.strokeStyle = PALETTE.lane;
   ctx.lineWidth = 3;
   ctx.setLineDash([26, 22]);
@@ -203,6 +272,8 @@ export function drawCar(ctx, G, car) {
     ctx.save();
     ctx.translate(car.x, car.y);
     ctx.rotate(car.angle);
+    ctx.fillStyle = 'rgba(0,0,0,0.30)';
+    ctx.beginPath(); ctx.ellipse(3, 4, 27, 13, 0, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#26262a';
     ctx.fillRect(-22, -11, 44, 22);
     ctx.restore();
@@ -212,12 +283,26 @@ export function drawCar(ctx, G, car) {
   ctx.save();
   ctx.translate(car.x, car.y);
   ctx.rotate(car.angle);
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.fillRect(-20, -8, 44, 22);
+  // Soft elliptical ground shadow.
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.beginPath(); ctx.ellipse(3, 4, 27, 13, 0, 0, Math.PI * 2); ctx.fill();
+  // Two-tone body: base colour, a shaded lower band and a sunlit roof
+  // panel, all clipped to the body outline.
   ctx.fillStyle = car.kind === 'cop' ? '#23272f' : car.color;
   ctx.beginPath();
   ctx.roundRect(-22, -11, 44, 22, 6);
   ctx.fill();
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = 'rgba(0,0,0,0.17)';
+  ctx.fillRect(-22, 4, 44, 7); // shaded lower band
+  ctx.fillStyle = 'rgba(255,255,255,0.14)';
+  ctx.fillRect(-22, -11, 44, 4); // sunlit top edge
+  ctx.fillStyle = 'rgba(255,255,255,0.20)';
+  ctx.beginPath();
+  ctx.roundRect(-9, -8, 17, 16, 3);
+  ctx.fill(); // roof panel highlight
+  ctx.restore();
   if (car.kind === 'cop') {
     ctx.fillStyle = '#eef1f4';
     ctx.fillRect(-8, -11, 16, 22); // white door band
@@ -230,6 +315,8 @@ export function drawCar(ctx, G, car) {
   // Windshield (front) and rear window.
   ctx.fillStyle = 'rgba(170,220,245,0.9)';
   ctx.fillRect(6, -8, 7, 16);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillRect(6, -8, 2.5, 16); // windshield glint
   ctx.fillStyle = 'rgba(120,160,190,0.8)';
   ctx.fillRect(-13, -8, 5, 16);
   // Wheels.
@@ -260,8 +347,8 @@ function drawPed(ctx, G, ped) {
     return;
   }
   if (!onScreen(G, ped.x, ped.y, 30)) return;
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath(); ctx.arc(ped.x + 2, ped.y + 3, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.20)';
+  ctx.beginPath(); ctx.ellipse(ped.x + 2, ped.y + 3, 9, 5.5, 0, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = ped.color;
   ctx.beginPath(); ctx.arc(ped.x, ped.y, 8, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#f2c79b';
@@ -276,22 +363,26 @@ function drawPed(ctx, G, ped) {
 
 function drawPlayer(ctx, G) {
   const p = G.player;
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.beginPath(); ctx.arc(p.x + 2, p.y + 3, 11, 0, Math.PI * 2); ctx.fill();
+  // A subtle walk bob: the body lifts with distance travelled while the
+  // ground shadow stays planted, so steps read as steps, not gliding.
+  const bob = p.speedMag > 24 ? Math.abs(Math.sin((p.walkDist || 0) * 0.055)) * 2.4 : 0;
+  const by = p.y - bob;
+  ctx.fillStyle = 'rgba(0,0,0,0.26)';
+  ctx.beginPath(); ctx.ellipse(p.x + 2, p.y + 4, 12.5, 7, 0, 0, Math.PI * 2); ctx.fill();
   // Aim tick toward the cursor.
   ctx.strokeStyle = 'rgba(255,255,255,0.75)';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.moveTo(p.x + Math.cos(p.aim) * 12, p.y + Math.sin(p.aim) * 12);
-  ctx.lineTo(p.x + Math.cos(p.aim) * 21, p.y + Math.sin(p.aim) * 21);
+  ctx.moveTo(p.x + Math.cos(p.aim) * 12, by + Math.sin(p.aim) * 12);
+  ctx.lineTo(p.x + Math.cos(p.aim) * 21, by + Math.sin(p.aim) * 21);
   ctx.stroke();
   // Nilo: teal jacket, unmistakable among the crowd.
   ctx.fillStyle = '#0e7c86';
-  ctx.beginPath(); ctx.arc(p.x, p.y, 11, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(p.x, by, 11, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#f2c79b';
-  ctx.beginPath(); ctx.arc(p.x, p.y, 5.6, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(p.x, by, 5.6, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#ffd76a';
-  ctx.beginPath(); ctx.arc(p.x, p.y - 2, 3, 0, Math.PI * 2); ctx.fill(); // cap
+  ctx.beginPath(); ctx.arc(p.x, by - 2, 3, 0, Math.PI * 2); ctx.fill(); // cap
 }
 
 function drawBullets(ctx, G) {
